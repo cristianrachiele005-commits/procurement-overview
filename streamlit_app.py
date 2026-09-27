@@ -1,151 +1,154 @@
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import numpy as np
+from datetime import date, timedelta
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+st.set_page_config(page_title="Procurement Overview", page_icon="📦", layout="wide")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+PFLICHTSPALTEN = ["Bestellnummer", "Bestelldatum", "Lieferant", "Artikel", "Menge", "Preis CHF"]
+
+
+def chf(wert):
+    """Zahl im Schweizer Format, z. B. 12'345"""
+    return f"CHF {wert:,.0f}".replace(",", "'")
+
 
 @st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+def beispieldaten(anzahl=400):
+    rng = np.random.default_rng(42)
+    lieferanten = [
+        "Muster Metall AG", "Alpen Elektro GmbH", "Präzisionsteile Meier",
+        "Kunststoff Huber AG", "Schrauben Frei", "Hydraulik Suisse SA",
+        "Verpackung Keller", "Antriebe Weber AG",
+    ]
+    artikel = [
+        "Wellenlager 40mm", "Steuerplatine V2", "Gehäuse Alu", "Dichtungsset",
+        "Sechskantschraube M8", "Hydraulikzylinder", "Kartonbox 60x40",
+        "Getriebemotor 0.75kW", "Kabelbaum 2m", "Frästeil Stahl",
+    ]
+    start = date(2026, 1, 1)
+    bestelldatum = [start + timedelta(days=int(d)) for d in rng.integers(0, 265, anzahl)]
+    df = pd.DataFrame({
+        "Bestellnummer": [f"B-{26000 + i}" for i in range(anzahl)],
+        "Bestelldatum": pd.to_datetime(bestelldatum),
+        "Lieferant": rng.choice(lieferanten, anzahl, p=[.22, .18, .14, .12, .1, .1, .08, .06]),
+        "Artikel": rng.choice(artikel, anzahl),
+        "Menge": rng.integers(1, 200, anzahl),
+        "Preis CHF": rng.uniform(2, 450, anzahl).round(2),
+        "Status": rng.choice(["Offen", "Bestätigt", "Geliefert"], anzahl, p=[.2, .3, .5]),
+    })
+    return df
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+def daten_laden(datei):
+    if datei.name.lower().endswith(".csv"):
+        df = pd.read_csv(datei, sep=None, engine="python")
+    else:
+        df = pd.read_excel(datei)
+    fehlend = [s for s in PFLICHTSPALTEN if s not in df.columns]
+    if fehlend:
+        st.error(f"In der Datei fehlen diese Spalten: {', '.join(fehlend)}")
+        st.stop()
+    df["Bestelldatum"] = pd.to_datetime(df["Bestelldatum"], dayfirst=True, errors="coerce")
+    if "Status" not in df.columns:
+        df["Status"] = "Unbekannt"
+    return df
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+# ---------------- Seitenleiste: Daten & Filter ----------------
+st.sidebar.header("Daten")
+upload = st.sidebar.file_uploader("Bestellungen hochladen (Excel oder CSV)", type=["xlsx", "csv"])
+st.sidebar.caption("Benötigte Spalten: " + ", ".join(PFLICHTSPALTEN) + " (optional: Status)")
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+if upload:
+    df = daten_laden(upload)
+else:
+    df = beispieldaten()
+    st.sidebar.info("Es werden Beispieldaten angezeigt.")
 
-    return gdp_df
+df["Bestellwert CHF"] = (df["Menge"] * df["Preis CHF"]).round(2)
 
-gdp_df = get_gdp_data()
+st.sidebar.header("Filter")
+min_d, max_d = df["Bestelldatum"].min().date(), df["Bestelldatum"].max().date()
+zeitraum = st.sidebar.date_input("Zeitraum", (min_d, max_d), min_value=min_d, max_value=max_d)
+lief_auswahl = st.sidebar.multiselect("Lieferanten", sorted(df["Lieferant"].unique()))
+status_auswahl = st.sidebar.multiselect("Status", sorted(df["Status"].unique()))
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+gefiltert = df.copy()
+if isinstance(zeitraum, tuple) and len(zeitraum) == 2:
+    von, bis = pd.to_datetime(zeitraum[0]), pd.to_datetime(zeitraum[1])
+    gefiltert = gefiltert[gefiltert["Bestelldatum"].between(von, bis)]
+if lief_auswahl:
+    gefiltert = gefiltert[gefiltert["Lieferant"].isin(lief_auswahl)]
+if status_auswahl:
+    gefiltert = gefiltert[gefiltert["Status"].isin(status_auswahl)]
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+# ---------------- Hauptbereich ----------------
+st.title("📦 Procurement Overview")
+st.caption("Übersicht über Bestellvolumen, Lieferanten und alle Bestellungen")
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+if gefiltert.empty:
+    st.warning("Keine Bestellungen für diese Filter gefunden.")
+    st.stop()
 
-# Add some spacing
-''
-''
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Bestellvolumen", chf(gefiltert["Bestellwert CHF"].sum()))
+k2.metric("Bestellungen", f"{gefiltert['Bestellnummer'].nunique():,}".replace(",", "'"))
+k3.metric("Lieferanten", gefiltert["Lieferant"].nunique())
+k4.metric("Ø Bestellwert", chf(gefiltert["Bestellwert CHF"].mean()))
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+st.divider()
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+links, rechts = st.columns(2)
+with links:
+    st.subheader("Umsatz pro Lieferant")
+    pro_lieferant = (gefiltert.groupby("Lieferant")["Bestellwert CHF"].sum()
+                     .sort_values(ascending=False))
+    st.bar_chart(pro_lieferant, horizontal=True, y_label="", x_label="CHF")
 
-countries = gdp_df['Country Code'].unique()
+with rechts:
+    st.subheader("Bestellvolumen pro Monat")
+    pro_monat = (gefiltert.set_index("Bestelldatum")["Bestellwert CHF"]
+                 .resample("MS").sum())
+    pro_monat.index = pro_monat.index.strftime("%Y-%m")
+    st.bar_chart(pro_monat, y_label="CHF", x_label="")
 
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
+st.subheader("Lieferanten-Ranking")
+ranking = (gefiltert.groupby("Lieferant")
+           .agg(Bestellungen=("Bestellnummer", "nunique"),
+                Umsatz=("Bestellwert CHF", "sum"))
+           .sort_values("Umsatz", ascending=False))
+ranking["Anteil"] = ranking["Umsatz"] / ranking["Umsatz"].sum() * 100
+st.dataframe(
+    ranking,
+    use_container_width=True,
+    column_config={
+        "Umsatz": st.column_config.NumberColumn("Umsatz CHF", format="%.0f"),
+        "Anteil": st.column_config.ProgressColumn("Anteil", format="%.1f %%", min_value=0, max_value=100),
+    },
 )
 
-''
-''
+st.subheader("Alle Bestellungen")
+suche = st.text_input("Suche (Bestellnummer, Artikel, Lieferant)")
+tabelle = gefiltert.sort_values("Bestelldatum", ascending=False)
+if suche:
+    maske = tabelle[["Bestellnummer", "Artikel", "Lieferant"]].astype(str).apply(
+        lambda s: s.str.contains(suche, case=False)).any(axis=1)
+    tabelle = tabelle[maske]
 
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+st.dataframe(
+    tabelle,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Bestelldatum": st.column_config.DateColumn("Bestelldatum", format="DD.MM.YYYY"),
+        "Preis CHF": st.column_config.NumberColumn(format="%.2f"),
+        "Bestellwert CHF": st.column_config.NumberColumn(format="%.2f"),
+    },
+)
+st.download_button(
+    "Tabelle als CSV herunterladen",
+    tabelle.to_csv(index=False, sep=";").encode("utf-8-sig"),
+    file_name="bestellungen.csv",
+    mime="text/csv",
+)
